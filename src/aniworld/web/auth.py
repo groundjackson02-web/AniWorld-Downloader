@@ -95,14 +95,32 @@ def get_or_create_secret_key():
 
 
 def get_current_user():
+    # 1. Try Session (Cookie)
     uid = session.get("user_id")
-    if uid is None:
-        return None
-    return {
-        "id": uid,
-        "username": session.get("user_name", ""),
-        "role": session.get("user_role", "user"),
-    }
+    if uid is not None:
+        return {
+            "id": uid,
+            "username": session.get("user_name", ""),
+            "role": session.get("user_role", "user"),
+        }
+
+    # 2. Try API Key (Bearer Token)
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        conn = get_db()
+        try:
+            row = conn.execute("SELECT id, username, role FROM users WHERE api_key = ?", (token,)).fetchone()
+            if row:
+                return {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "role": row["role"],
+                }
+        finally:
+            conn.close()
+
+    return None
 
 
 def refresh_session_role():
@@ -129,10 +147,18 @@ def refresh_session_role():
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if session.get("user_id") is None:
+        user = get_current_user()
+        if user is None:
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "authentication required"}), 401
             return redirect(url_for("auth.login"))
+        
+        # Sync user info into session if it was a token login
+        if session.get("user_id") is None:
+            session["user_id"] = user["id"]
+            session["user_name"] = user["username"]
+            session["user_role"] = user["role"]
+            
         return f(*args, **kwargs)
 
     return decorated
@@ -141,11 +167,12 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if session.get("user_id") is None:
+        user = get_current_user()
+        if user is None:
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "authentication required"}), 401
             return redirect(url_for("auth.login"))
-        if session.get("user_role") != "admin":
+        if user["role"] != "admin":
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "admin access required"}), 403
             return redirect(url_for("index"))

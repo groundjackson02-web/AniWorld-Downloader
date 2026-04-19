@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
     auth_method TEXT NOT NULL DEFAULT 'local',
     sso_subject TEXT,
     sso_issuer TEXT,
+    api_key TEXT UNIQUE,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
