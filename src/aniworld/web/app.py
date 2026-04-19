@@ -92,6 +92,78 @@ _queue_lock = threading.Lock()
 # Auto-sync worker state
 _autosync_worker_started = False
 
+# Cleanup worker state
+_cleanup_worker_started = False
+
+def _cleanup_worker():
+    """Background thread that deletes files older than 24 hours."""
+    import os
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    while True:
+        try:
+            logger.info("Running scheduled download cleanup...")
+            now = datetime.utcnow()
+            max_age = timedelta(days=1)
+
+            # Determine paths to scan
+            raw = os.environ.get("ANIWORLD_DOWNLOAD_PATH", "")
+            if raw:
+                dl_base = Path(raw).expanduser()
+                if not dl_base.is_absolute():
+                    dl_base = Path.home() / dl_base
+            else:
+                dl_base = Path.home() / "Downloads"
+
+            scan_roots = [dl_base]
+            for cp in get_custom_paths():
+                cp_path = Path(cp["path"]).expanduser()
+                if not cp_path.is_absolute():
+                    cp_path = Path.home() / cp_path
+                scan_roots.append(cp_path)
+
+            deleted_count = 0
+            for root in scan_roots:
+                if not root.is_dir():
+                    continue
+                # Scan all files recursively
+                for f in list(root.rglob("*")):
+                    if f.is_file():
+                        try:
+                            mtime = datetime.fromtimestamp(f.stat().st_mtime)
+                            if now - mtime > max_age:
+                                f.unlink()
+                                deleted_count += 1
+                        except OSError:
+                            pass
+
+                # Clean up empty directories (bottom-up)
+                for dirpath in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+                    if dirpath.is_dir():
+                        try:
+                            dirpath.rmdir()
+                        except OSError:
+                            pass
+            
+            if deleted_count > 0:
+                logger.info("Cleaned up %d old files from downloads.", deleted_count)
+            
+            # Run cleanup every hour
+            time.sleep(3600)
+        except Exception as e:
+            logger.error("Cleanup worker error: %s", e, exc_info=True)
+            time.sleep(600)
+
+def _ensure_cleanup_worker():
+    """Start the cleanup worker thread once."""
+    global _cleanup_worker_started
+    if _cleanup_worker_started:
+        return
+    _cleanup_worker_started = True
+    thread = threading.Thread(target=_cleanup_worker, daemon=True)
+    thread.start()
+
 # Track jobs currently being synced to prevent duplicate runs
 _syncing_jobs = set()
 _syncing_jobs_lock = threading.Lock()
@@ -607,6 +679,7 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
     if not _debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         _ensure_queue_worker()
         _ensure_autosync_worker()
+        _ensure_cleanup_worker()
 
     @app.after_request
     def _set_security_headers(response):
@@ -1029,6 +1102,49 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
         return jsonify({"active": True, "done": session.done})
 
     # ─────────────────────────────────────────────────────────────────────────
+
+    @app.route("/api/stream/<path:file_path>")
+    def api_stream(file_path):
+        """Stream a downloaded video file by searching through all download roots."""
+        import os
+        from pathlib import Path
+        from flask import send_from_directory, abort
+
+        # Determine the default base path
+        raw = os.environ.get("ANIWORLD_DOWNLOAD_PATH", "")
+        if raw:
+            dl_base = Path(raw).expanduser()
+            if not dl_base.is_absolute():
+                dl_base = Path.home() / dl_base
+        else:
+            dl_base = Path.home() / "Downloads"
+
+        # All possible roots to search in
+        scan_roots = [dl_base]
+        for cp in get_custom_paths():
+            cp_path = Path(cp["path"]).expanduser()
+            if not cp_path.is_absolute():
+                cp_path = Path.home() / cp_path
+            scan_roots.append(cp_path)
+
+        # Find which root contains the file
+        for root in scan_roots:
+            if not root.is_dir():
+                continue
+            
+            # Construct the full path and verify it's inside the root to prevent traversal
+            target_path = (root / file_path).resolve()
+            try:
+                target_path.relative_to(root.resolve())
+            except ValueError:
+                continue # Not inside this root
+
+            if target_path.is_file():
+                # Use send_from_directory for safe serving
+                # We pass the parent folder as the directory and the filename as the filename
+                return send_from_directory(target_path.parent, target_path.name)
+
+        return jsonify({"error": "File not found"}), 404
 
     @app.route("/library")
     def library_page():
