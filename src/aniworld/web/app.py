@@ -57,9 +57,11 @@ from .db import (
     update_queue_progress,
     update_playback,
     get_playback,
+    get_recent_playback,
     update_library,
     get_user_library,
     remove_from_library,
+
 )
 
 logger = get_logger(__name__)
