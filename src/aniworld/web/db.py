@@ -29,6 +29,27 @@ ON users (sso_issuer, sso_subject)
 WHERE sso_issuer IS NOT NULL AND sso_subject IS NOT NULL;
 """
 
+_CREATE_PLAYBACK_TABLE = """\
+CREATE TABLE IF NOT EXISTS user_playback (
+    user_id INTEGER NOT NULL,
+    series_url TEXT NOT NULL,
+    episode_url TEXT NOT NULL,
+    timestamp REAL NOT NULL,
+    last_updated TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, episode_url)
+);
+"""
+
+_CREATE_LIBRARY_TABLE = """\
+CREATE TABLE IF NOT EXISTS user_library (
+    user_id INTEGER NOT NULL,
+    series_url TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('watchlist', 'favorite')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, series_url)
+);
+"""
+
 
 def get_db():
     ANIWORLD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,6 +80,8 @@ def init_db():
     try:
         conn.execute(_CREATE_TABLE)
         conn.execute(_CREATE_SSO_INDEX)
+        conn.execute(_CREATE_PLAYBACK_TABLE)
+        conn.execute(_CREATE_LIBRARY_TABLE)
         conn.commit()
         _migrate_db(conn)
     finally:
@@ -777,7 +800,69 @@ def remove_autosync_job(job_id):
         conn.close()
 
 
-# ===== Statistics =====
+# ===== User State & Tracking =====
+
+def update_playback(user_id, series_url, episode_url, timestamp):
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO user_playback (user_id, series_url, episode_url, timestamp, last_updated) "
+            "VALUES (?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(user_id, episode_url) DO UPDATE SET "
+            "timestamp = excluded.timestamp, last_updated = excluded.last_updated",
+            (user_id, series_url, episode_url, timestamp),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_playback(user_id, episode_url):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT timestamp FROM user_playback WHERE user_id = ? AND episode_url = ?",
+            (user_id, episode_url),
+        ).fetchone()
+        return row["timestamp"] if row else 0
+    finally:
+        conn.close()
+
+
+def update_library(user_id, series_url, status):
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO user_library (user_id, series_url, status, updated_at) "
+            "VALUES (?, ?, ?, datetime('now')) "
+            "ON CONFLICT(user_id, series_url) DO UPDATE SET "
+            "status = excluded.status, updated_at = excluded.updated_at",
+            (user_id, series_url, status),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_library(user_id):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT series_url, status, updated_at FROM user_library WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def remove_from_library(user_id, series_url):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM user_library WHERE user_id = ? AND series_url = ?", (user_id, series_url))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_sync_stats():

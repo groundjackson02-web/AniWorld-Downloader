@@ -1129,6 +1129,94 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             "new": new
         })
 
+    @app.route("/api/playback/update", methods=["POST"])
+    @login_required
+    def api_playback_update():
+        """Save the current playback position for an episode."""
+        data = request.get_json(silent=True) or {}
+        series_url = (data.get("series_url") or "").strip()
+        episode_url = (data.get("episode_url") or "").strip()
+        timestamp = data.get("timestamp")
+        
+        if not series_url or not episode_url or timestamp is None:
+            return jsonify({"error": "series_url, episode_url and timestamp are required"}), 400
+        
+        try:
+            user_id = session.get("user_id")
+            update_playback(user_id, series_url, episode_url, float(timestamp))
+            return jsonify({"ok": True})
+        except Exception as e:
+            logger.error(f"Error updating playback: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/playback/get")
+    @login_required
+    def api_playback_get():
+        """Retrieve the last playback position for an episode."""
+        episode_url = request.args.get("episode_url", "").strip()
+        if not episode_url:
+            return jsonify({"error": "episode_url is required"}), 400
+        
+        try:
+            user_id = session.get("user_id")
+            timestamp = get_playback(user_id, episode_url)
+            return jsonify({"timestamp": timestamp})
+        except Exception as e:
+            logger.error(f"Error getting playback: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/library/update", methods=["POST"])
+    @login_required
+    def api_library_update():
+        """Add or update a series in the user's library (watchlist/favorite)."""
+        data = request.get_json(silent=True) or {}
+        series_url = (data.get("series_url") or "").strip()
+        status = (data.get("status") or "").strip() # 'watchlist' or 'favorite'
+        
+        if not series_url or not status:
+            return jsonify({"error": "series_url and status are required"}), 400
+        
+        if status not in ("watchlist", "favorite"):
+            return jsonify({"error": "status must be either 'watchlist' or 'favorite'"}), 400
+            
+        try:
+            user_id = session.get("user_id")
+            update_library(user_id, series_url, status)
+            return jsonify({"ok": True})
+        except Exception as e:
+            logger.error(f"Error updating library: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/library/get")
+    @login_required
+    def api_library_get():
+        """Retrieve the user's personal library."""
+        try:
+            user_id = session.get("user_id")
+            library = get_user_library(user_id)
+            return jsonify(library)
+        except Exception as e:
+            logger.error(f"Error getting library: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/library/remove", methods=["POST"])
+    @login_required
+    def api_library_remove():
+        """Remove a series from the user's library."""
+        data = request.get_json(silent=True) or {}
+        series_url = (data.get("series_url") or "").strip()
+        
+        if not series_url:
+            return jsonify({"error": "series_url is required"}), 400
+            
+        try:
+            user_id = session.get("user_id")
+            remove_from_library(user_id, series_url)
+            return jsonify({"ok": True})
+        except Exception as e:
+            logger.error(f"Error removing from library: {e}")
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/api/stream/<path:file_path>")
     def api_stream(file_path):
         """Stream a downloaded video file by searching through all download roots."""
