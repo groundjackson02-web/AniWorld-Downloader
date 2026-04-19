@@ -71,6 +71,8 @@ def _migrate_db(conn):
         conn.execute("ALTER TABLE users ADD COLUMN sso_subject TEXT")
     if "sso_issuer" not in columns:
         conn.execute("ALTER TABLE users ADD COLUMN sso_issuer TEXT")
+    if "api_key" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN api_key TEXT UNIQUE")
 
     conn.execute(_CREATE_SSO_INDEX)
     conn.commit()
