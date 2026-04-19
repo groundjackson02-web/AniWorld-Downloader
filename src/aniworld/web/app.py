@@ -4,7 +4,7 @@ import threading
 import time
 
 import requests
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from flask_wtf.csrf import CSRFProtect
 
 from ..config import LANG_KEY_MAP, LANG_LABELS, SUPPORTED_PROVIDERS
@@ -21,6 +21,7 @@ from ..search import (
     query,
 )
 from ..search import query as aniworld_query
+from .auth import login_required, admin_required
 from .db import (
     add_autosync_job,
     add_custom_path,
@@ -54,6 +55,11 @@ from .db import (
     update_autosync_job,
     update_queue_errors,
     update_queue_progress,
+    update_playback,
+    get_playback,
+    update_library,
+    get_user_library,
+    remove_from_library,
 )
 
 logger = get_logger(__name__)
@@ -599,7 +605,6 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             get_current_user,
             get_or_create_secret_key,
             init_oidc,
-            login_required,
             refresh_session_role,
         )
         from .db import has_any_admin, init_db
@@ -1149,10 +1154,37 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             logger.error(f"Error updating playback: {e}")
             return jsonify({"error": str(e)}), 500
 
+    @app.route("/api/playback/recent")
+    @login_required
+    def api_playback_recent():
+        """Retrieve the most recently watched episodes for the 'Continue Watching' row."""
+        try:
+            user_id = session.get("user_id")
+            recent = get_recent_playback(user_id)
+            
+            # Enrich with series metadata for the UI
+            enriched = []
+            for item in recent:
+                url = item["series_url"]
+                try:
+                    prov = resolve_provider(url)
+                    series = prov.series_cls(url=url)
+                    item["title"] = series.title
+                    item["poster_url"] = getattr(series, "poster_url", None)
+                except Exception:
+                    item["title"] = "Unknown Series"
+                    item["poster_url"] = None
+                enriched.append(item)
+                
+            return jsonify(enriched)
+        except Exception as e:
+            logger.error(f"Error fetching recent playback: {e}")
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/api/playback/get")
     @login_required
     def api_playback_get():
-        """Retrieve the last playback position for an episode."""
+        """Retrieve the last playback position and the next episode for an episode."""
         episode_url = request.args.get("episode_url", "").strip()
         if not episode_url:
             return jsonify({"error": "episode_url is required"}), 400
@@ -1160,7 +1192,32 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
         try:
             user_id = session.get("user_id")
             timestamp = get_playback(user_id, episode_url)
-            return jsonify({"timestamp": timestamp})
+            
+            # Find next episode
+            next_url = None
+            next_title = None
+            try:
+                prov = resolve_provider(episode_url)
+                episode = prov.episode_cls(url=episode_url)
+                # Logic to find next episode in the provider's model
+                # This depends on how the provider model is structured.
+                # As a fallback, we can fetch all episodes for the season and find the index.
+                season_url = episode.season.url
+                season = prov.season_cls(url=season_url, series=episode.series)
+                for i, ep in enumerate(season.episodes):
+                    if ep.url == episode_url and i + 1 < len(season.episodes):
+                        next_ep = season.episodes[i+1]
+                        next_url = next_ep.url
+                        next_title = getattr(next_ep, "title_de", getattr(next_ep, "title_en", "Next Episode"))
+                        break
+            except Exception as e:
+                logger.warning(f"Could not determine next episode: {e}")
+
+            return jsonify({
+                "timestamp": timestamp,
+                "next_episode_url": next_url,
+                "next_episode_title": next_title
+            })
         except Exception as e:
             logger.error(f"Error getting playback: {e}")
             return jsonify({"error": str(e)}), 500
@@ -1650,10 +1707,76 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
     def api_stats_general():
         return jsonify(get_general_stats())
 
+    @app.route("/api/episodes/next")
+    def api_episodes_next():
+        """Quick lookup for the next episode given a current episode URL."""
+        url = request.args.get("url", "").strip()
+        if not url:
+            return jsonify({"error": "url is required"}), 400
+        
+        try:
+            prov = resolve_provider(url)
+            episode = prov.episode_cls(url=url)
+            season = prov.season_cls(url=episode.season.url, series=episode.series)
+            for i, ep in enumerate(season.episodes):
+                if ep.url == url and i + 1 < len(season.episodes):
+                    next_ep = season.episodes[i+1]
+                    return jsonify({
+                        "url": next_ep.url,
+                        "episode_number": next_ep.episode_number,
+                        "title": getattr(next_ep, "title_de", getattr(next_ep, "title_en", "Next Episode"))
+                    })
+            return jsonify({"error": "No next episode found"}), 404
+        except Exception as e:
+            logger.error(f"Error finding next episode: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/library/recent")
+    def api_library_recent():
+        """Show recently added content in the local library."""
+        from pathlib import Path
+        from datetime import datetime
+
+        raw = os.environ.get("ANIWORLD_DOWNLOAD_PATH", "")
+        dl_base = Path(raw).expanduser() if raw else Path.home() / "Downloads"
+        
+        scan_roots = [dl_base]
+        for cp in get_custom_paths():
+            scan_roots.append(Path(cp["path"]).expanduser())
+
+        recent_files = []
+        video_exts = {".mkv", ".mp4", ".avi", ".webm", ".flv", ".mov", ".wmv", ".m4v", ".ts"}
+
+        for root in scan_roots:
+            if not root.is_dir(): continue
+            for f in root.rglob("*"):
+                if f.is_file() and f.suffix.lower() in video_exts:
+                    recent_files.append({
+                        "path": str(f.relative_to(root)),
+                        "mtime": f.stat().st_mtime,
+                        "name": f.name
+                    })
+        
+        # Sort by mtime DESC and take top 20
+        recent_files.sort(key=lambda x: x["mtime"], reverse=True)
+        top_files = recent_files[:20]
+        
+        # Group by series (simple heuristic: first folder in relative path)
+        grouped = {}
+        for f in top_files:
+            parts = f["path"].split("/")
+            series = parts[0] if len(parts) > 1 else "Misc"
+            if series not in grouped:
+                grouped[series] = []
+            grouped[series].append(f)
+            
+        return jsonify(grouped)
+
     @app.route("/api/library")
     def api_library():
         from pathlib import Path
 
+        view = request.args.get("view", "").strip()
         raw = os.environ.get("ANIWORLD_DOWNLOAD_PATH", "")
         if raw:
             dl_base = Path(raw).expanduser()
@@ -1784,6 +1907,17 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
                         }
                     )
 
+        if view == "grid":
+            # Flatten the structure for TV grid
+            flattened = []
+            for loc in locations:
+                if loc["titles"]:
+                    flattened.extend(loc["titles"])
+                elif loc["lang_folders"]:
+                    for lf in loc["lang_folders"]:
+                        flattened.extend(lf["titles"])
+            return jsonify({"series": flattened})
+
         return jsonify({"lang_sep": lang_sep, "locations": locations})
 
     @app.route("/api/library/delete", methods=["POST"])
@@ -1889,8 +2023,6 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
         return jsonify({"ok": True, "deleted": deleted})
 
     if auth_enabled:
-        from .auth import admin_required
-
         # Endpoints that require admin instead of just login
         _admin_only = {
             "settings_page",

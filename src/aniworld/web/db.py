@@ -856,6 +856,20 @@ def get_user_library(user_id):
         conn.close()
 
 
+def get_recent_playback(user_id, limit=10):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT series_url, episode_url, timestamp, last_updated "
+            "FROM user_playback WHERE user_id = ? "
+            "ORDER BY last_updated DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def remove_from_library(user_id, series_url):
     conn = get_db()
     try:
