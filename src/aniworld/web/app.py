@@ -18,6 +18,7 @@ from ..search import (
     fetch_popular_series,
     query_s_to,
     random_anime,
+    query,
 )
 from ..search import query as aniworld_query
 from .db import (
@@ -1102,6 +1103,70 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
         return jsonify({"active": True, "done": session.done})
 
     # ─────────────────────────────────────────────────────────────────────────
+
+    @app.route("/api/popular")
+    def api_popular():
+        """Return a list of popular animes."""
+        popular = fetch_popular_animes()
+        if popular is None:
+            return jsonify({"error": "Failed to fetch popular animes"}), 500
+        return jsonify(popular)
+
+    @app.route("/api/dashboard")
+    def api_dashboard():
+        """Return a dashboard view with popular and new animes."""
+        popular = fetch_popular_animes() or []
+        new = fetch_new_animes() or []
+        return jsonify({
+            "popular": popular,
+            "new": new
+        })
+
+    @app.route("/api/search")
+    def api_search():
+        """Search for animes based on a query parameter 'q'."""
+        q = request.args.get("q", "").strip()
+        if not q:
+            return jsonify({"error": "Query parameter 'q' is required"}), 400
+        
+        results = query(q)
+        if results is None:
+            return jsonify({"error": "Search failed"}), 500
+        return jsonify(results)
+
+    @app.route("/api/series/<slug>")
+    def api_series(slug):
+        """Return detailed information about a series, including seasons and episodes."""
+        from ..models.aniworld_to.series import AniworldSeries
+        try:
+            url = f"https://aniworld.to/anime/stream/{slug}"
+            series = AniworldSeries(url)
+            
+            seasons_data = []
+            for s in series.seasons:
+                episodes_data = []
+                for e in s.episodes:
+                    episodes_data.append({
+                        "number": e.episode_number,
+                        "title": e.title_de or e.title_en,
+                        "url": e.url
+                    })
+                
+                seasons_data.append({
+                    "number": s.season_number,
+                    "url": s.url,
+                    "episodes": episodes_data
+                })
+            
+            return jsonify({
+                "title": series.title,
+                "description": series.description,
+                "poster_url": series.poster_url,
+                "seasons": seasons_data
+            })
+        except Exception as e:
+            logger.error(f"Error fetching series {slug}: {e}")
+            return jsonify({"error": str(e)}), 404
 
     @app.route("/api/stream/<path:file_path>")
     def api_stream(file_path):
