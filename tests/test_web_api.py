@@ -69,10 +69,33 @@ def test_streaming_api():
             
         print("Streaming API test passed!")
 
+def test_downloads_list():
+    print("Testing Downloads List API...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        os.environ["ANIWORLD_DOWNLOAD_PATH"] = str(tmp_path)
+        
+        # Create a dummy video file
+        test_file = tmp_path / "test_download.mkv"
+        test_file.write_text("dummy video content")
+        
+        app = create_app(auth_enabled=False)
+        with app.test_client() as client:
+            response = client.get("/api/downloads/list")
+            assert response.status_code == 200
+            data = response.get_json()
+            assert isinstance(data, list)
+            assert len(data) == 1
+            assert data[0]["filename"] == "test_download.mkv"
+            assert "relative_path" in data[0]
+            
+        print("Downloads list API test passed!")
+
 if __name__ == "__main__":
     try:
         test_cleanup_worker()
         test_streaming_api()
+        test_downloads_list()
         print("\nAll Web API tests passed!")
     except Exception as e:
         print(f"\nTests failed: {e}")

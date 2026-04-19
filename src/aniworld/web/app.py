@@ -1508,6 +1508,52 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
                 pass
         return jsonify(stats)
 
+    @app.route("/api/downloads/list")
+    def api_downloads_list():
+        """Return a flat list of all downloaded video files."""
+        import os
+        from pathlib import Path
+        from datetime import datetime
+
+        # Video extensions to look for
+        video_exts = {".mkv", ".mp4", ".avi", ".webm", ".flv", ".mov", ".wmv", ".m4v", ".ts"}
+
+        # Determine download roots
+        raw = os.environ.get("ANIWORLD_DOWNLOAD_PATH", "")
+        if raw:
+            dl_base = Path(raw).expanduser()
+            if not dl_base.is_absolute():
+                dl_base = Path.home() / dl_base
+        else:
+            dl_base = Path.home() / "Downloads"
+
+        scan_roots = [dl_base]
+        for cp in get_custom_paths():
+            cp_path = Path(cp["path"]).expanduser()
+            if not cp_path.is_absolute():
+                cp_path = Path.home() / cp_path
+            scan_roots.append(cp_path)
+
+        files = []
+        for root in scan_roots:
+            if not root.is_dir():
+                continue
+            for f in root.rglob("*"):
+                if f.is_file() and f.suffix.lower() in video_exts:
+                    try:
+                        stat = f.stat()
+                        files.append({
+                            "filename": f.name,
+                            "relative_path": str(f.relative_to(root)),
+                            "full_path": str(f),
+                            "size": stat.st_size,
+                            "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        })
+                    except (OSError, ValueError):
+                        continue
+
+        return jsonify(files)
+
     @app.route("/api/stats/queue")
     def api_stats_queue():
         return jsonify(get_queue_stats())
