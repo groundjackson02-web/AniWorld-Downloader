@@ -348,9 +348,38 @@ def oidc_callback():
         )
 
 
-# ---------------------------------------------------------------------------
-# Admin dashboard + API
-# ---------------------------------------------------------------------------
+@auth_bp.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    user, err = verify_user(username, password)
+    if not user:
+        return jsonify({"error": err or "Invalid credentials"}), 401
+
+    # Ensure user has an api_key
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT api_key FROM users WHERE id = ?", (user["id"],)).fetchone()
+        token = row["api_key"]
+        if not token:
+            import secrets
+            token = secrets.token_urlsafe(32)
+            conn.execute("UPDATE users SET api_key = ? WHERE id = ?", (token, user["id"]))
+            conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({
+        "token": token,
+        "username": user["username"],
+        "role": user["role"]
+    })
+
 
 
 @auth_bp.route("/admin")
